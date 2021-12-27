@@ -78,8 +78,13 @@ unsigned int get_zynswitch_dtus(uint8_t i, unsigned int long_dtus);
 
 #define MAX_NUM_ZYNCODERS 4
 
+#ifdef UART_ENCODERS
+// Number of ticks per retent in rotary encoders
+#define ZYNCODER_TICKS_PER_RETENT 1
+#else
 // Number of ticks per retent in rotary encoders
 #define ZYNCODER_TICKS_PER_RETENT 4
+#endif
 
 struct zyncoder_st {
 	uint8_t enabled;

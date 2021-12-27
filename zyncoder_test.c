@@ -37,6 +37,10 @@
 unsigned int zyncoder_pin_a[4]={4,5,6,7};
 unsigned int zyncoder_pin_b[4]={8,9,10,11};
 unsigned int zynswitch_pin[NUM_SWITCHES]={0,1,2,3};
+//UART Encoders
+//unsigned int zyncoder_pin_a[4]={1,4,7,10};
+//unsigned int zyncoder_pin_b[4]={2,5,8,11};
+//unsigned int zynswitch_pin[NUM_SWITCHES]={0,3,6,9};
 #else
 
 #ifdef MCP23017_ENCODERS
@@ -53,6 +57,8 @@ unsigned int zynswitch_pin[NUM_SWITCHES]  = { 100, 103, 108, 111, 106, 107, 114,
 unsigned int zyncoder_pin_a[4]={26,25,0,4};
 unsigned int zyncoder_pin_b[4]={21,27,7,3};
 unsigned int zynswitch_pin[NUM_SWITCHES]={107,23,106,2};
+//UART Encoders
+//unsigned int zynswitch_pin[NUM_SWITCHES]={0,3,6,9};
 #endif
 
 #endif

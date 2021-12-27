@@ -36,6 +36,7 @@
 
 #include "zyncoder.h"
 
+#ifndef UART_ENCODERS
 #if defined(HAVE_WIRINGPI_LIB)
 	#include <wiringPi.h>
 	#include <wiringPiI2C.h>
@@ -67,6 +68,37 @@
 	#define MCP23008_BASE_PIN 100
 	#define MCP23008_I2C_ADDRESS 0x20
 	#include "wiringPiEmu.h"
+#endif
+
+#else //UART-based wiring
+
+#include "wiringSerial.h"
+#include <errno.h>
+
+#define PAYLOAD_SIZE_BYTES 2
+
+#define BUFFER_SIZE_BYTES (PAYLOAD_SIZE_BYTES + 2)
+//Frame identifiers
+#define START_FRAME_VALUE 0xEA
+#define END_FRAME_VALUE   0xFB
+
+//Bit position for each encoder group
+/*	END_FRAME BYTE N..................BYTE0 START_FRAME
+*	MSB......................LSB
+*	END_FRAME.....CCW_BP1 BTN_BP1 CW_BP0 CCW_BP0 BTN_BP0 START_FRAME
+*/
+#define CW_BP 2
+#define CCW_BP 1
+#define BTN_BP 0
+
+uint8_t buffer[BUFFER_SIZE_BYTES];
+uint8_t head, prev_head, tail, elementsInBuffer;
+
+void 	insertInBuffer	(uint8_t element);
+uint8_t getBufferData	(uint8_t* pBuffer);
+void 	flushBuffer		();
+uint8_t checkFraming	(uint8_t startByte, uint8_t endByte, int fd);
+
 #endif
 
 #define bitRead(value, bit) (((value) >> (bit)) & 0x01)
@@ -132,6 +164,10 @@ int poll_zynswitches_us=10000;
 
 //Switches Polling Thread (should be avoided!)
 pthread_t init_poll_zynswitches();
+#elif defined(UART_ENCODERS)
+
+pthread_t init_uart_thread();
+
 #endif
 
 unsigned int int_to_int(unsigned int k) {
@@ -148,13 +184,17 @@ int init_zyncoder() {
 		zyncoders[i].enabled=0;
 		for (j=0;j<ZYNCODER_TICKS_PER_RETENT;j++) zyncoders[i].dtus[j]=0;
 	}
+#ifndef UART_ENCODERS	
 	wiringPiSetup();
+#endif
 
 #if defined(MCP23017_ENCODERS)
 	zyncoder_mcp23017_node = init_mcp23017(MCP23017_BASE_PIN, MCP23017_I2C_ADDRESS, MCP23017_INTA_PIN, MCP23017_INTB_PIN, zyncoder_mcp23017_bank_ISRs);
 #elif defined(MCP23008_ENCODERS)   
 	mcp23008Setup(MCP23008_BASE_PIN, MCP23008_I2C_ADDRESS);
 	init_poll_zynswitches();
+#elif defined(UART_ENCODERS)
+	init_uart_thread();
 #endif
 	return 1;
 }
@@ -163,7 +203,8 @@ int end_zyncoder() {
 	return 1;
 }
 
-#ifndef MCP23008_ENCODERS 
+#if !(defined(MCP23008_ENCODERS) || defined(UART_ENCODERS))
+// TODO: Is this some default handler for other wiring types??
 struct wiringPiNodeStruct * init_mcp23017(int base_pin, uint8_t i2c_address, uint8_t inta_pin, uint8_t intb_pin, void (*isrs[2])) {
 	uint8_t reg;
 
@@ -426,6 +467,8 @@ struct zynswitch_st *setup_zynswitch(uint8_t i, uint8_t pin) {
 	zynswitch->dtus = 0;
 	zynswitch->status = 0;
 
+// No hardware control needed if using UART
+#ifndef UART_ENCODERS
 	if (pin>0) {
 		pinMode(pin, INPUT);
 		pullUpDnControl(pin, PUD_UP);
@@ -441,7 +484,7 @@ struct zynswitch_st *setup_zynswitch(uint8_t i, uint8_t pin) {
 		}
 #endif
 	}
-
+#endif
 	return zynswitch;
 }
 
@@ -538,6 +581,10 @@ void send_zyncoder(uint8_t i) {
 
 #ifdef MCP23008_ENCODERS
 void update_zyncoder(uint8_t i) {
+
+#elif defined(UART_ENCODERS)
+void update_zyncoder(uint8_t i, uint8_t* data) {
+
 #else
 void update_zyncoder(uint8_t i, uint8_t MSB, uint8_t LSB) {
 #endif
@@ -545,6 +592,7 @@ void update_zyncoder(uint8_t i, uint8_t MSB, uint8_t LSB) {
 	struct zyncoder_st *zyncoder = zyncoders + i;
 	if (zyncoder->enabled==0) return;
 
+#ifndef UART_ENCODERS
 #ifdef MCP23008_ENCODERS
 	uint8_t MSB = digitalRead(zyncoder->pin_a);
 	uint8_t LSB = digitalRead(zyncoder->pin_b);
@@ -554,10 +602,19 @@ void update_zyncoder(uint8_t i, uint8_t MSB, uint8_t LSB) {
 	uint8_t up=(sum == 0b1101 || sum == 0b0100 || sum == 0b0010 || sum == 0b1011);
 	uint8_t down=0;
 	if (!up) down=(sum == 0b1110 || sum == 0b0111 || sum == 0b0001 || sum == 0b1000);
+
+	zyncoder->last_encoded=encoded;
+
+#else
+	uint8_t down = (data[(zyncoder->pin_a)/8] >> ((zyncoder->pin_a)%8)) & 0x1;
+	uint8_t up = (data[(zyncoder->pin_b)/8] >> ((zyncoder->pin_b)%8)) & 0x1;
+	//printf("Zyncoder %d state up:%d down:%d\n", i, up, down);
+#endif
+
+
 #ifdef DEBUG
 	printf("zyncoder %2d - %08d\t%08d\t%d\t%d\n", i, int_to_int(encoded), int_to_int(sum), up, down);
 #endif
-	zyncoder->last_encoded=encoded;
 
 	if (zyncoder->step==0) {
 		//Get time interval from last tick
@@ -683,21 +740,23 @@ struct zyncoder_st *setup_zyncoder(uint8_t i, uint8_t pin_a, uint8_t pin_b, uint
 		zyncoder->last_encoded = 0;
 		zyncoder->tsus = 0;
 
+#ifndef UART_ENCODERS
 		if (zyncoder->pin_a!=zyncoder->pin_b) {
 			pinMode(pin_a, INPUT);
 			pinMode(pin_b, INPUT);
 			pullUpDnControl(pin_a, PUD_UP);
 			pullUpDnControl(pin_b, PUD_UP);
 
-#if defined(MCP23017_ENCODERS) 
+	#if defined(MCP23017_ENCODERS) 
 			// this is a bit brute force, but update all the banks
 			zyncoder_mcp23017_bankA_ISR();
 			zyncoder_mcp23017_bankB_ISR();
-#elif defined(MCP23008_ENCODERS) 
+	#elif defined(MCP23008_ENCODERS) 
 			wiringPiISR(pin_a,INT_EDGE_BOTH, update_zyncoder_funcs[i]);
 			wiringPiISR(pin_b,INT_EDGE_BOTH, update_zyncoder_funcs[i]);
-#endif
-		}
+	#endif
+	}
+#endif	
 	}
 
 	return zyncoder;
@@ -730,7 +789,7 @@ void set_value_zyncoder(uint8_t i, unsigned int v, int send) {
 // MCP23017 based encoders & switches
 //-----------------------------------------------------------------------------
 
-#ifndef MCP23008_ENCODERS 
+#if !(defined(MCP23008_ENCODERS) || defined(UART_ENCODERS)) 
 // ISR for handling the mcp23017 interrupts
 void zyncoder_mcp23017_ISR(struct wiringPiNodeStruct *wpns, uint16_t base_pin, uint8_t bank) {
 	// the interrupt has gone off for a pin change on the mcp23017
@@ -798,4 +857,182 @@ void zyncoder_mcp23017_ISR(struct wiringPiNodeStruct *wpns, uint16_t base_pin, u
 		}
 	}
 }
+#endif
+
+#ifdef UART_ENCODERS
+
+//Update switches
+void update_zynswitches(uint8_t* data) {
+	struct timespec ts;
+	unsigned long int tsus;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	tsus=ts.tv_sec*1000000 + ts.tv_nsec/1000;
+	int i;
+	uint8_t status;
+	for (i=0;i<MAX_NUM_ZYNSWITCHES;i++) {	
+		struct zynswitch_st *zynswitch = zynswitches + i;
+		if (!zynswitch->enabled) continue;
+
+		status=(data[(zynswitch->pin)/8] >> ((zynswitch->pin)%8)) & 0x1;
+		//printf("POLLING SWITCH %d (%d) => %d; DATA=%x %x\n",i,zynswitch->pin,status, data[0], data[1]);
+		if (status==zynswitch->status) continue;
+		zynswitch->status=status;
+		send_zynswitch_midi(zynswitch, status);
+		//printf("POLLING SWITCH %d => STATUS=%d (%lu)\n",i,zynswitch->status,tsus);
+		if (zynswitch->status==0) {
+			if (zynswitch->tsus>0) {
+				unsigned int dtus=tsus-zynswitch->tsus;
+				zynswitch->tsus=0;
+				//Ignore spurious ticks
+				if (dtus<1000) return;
+				//printf("Debounced Switch %d\n",i);
+				zynswitch->dtus=dtus;
+			}
+		} else zynswitch->tsus=tsus;
+	}
+}
+
+void * uart_thread(void *arg) {
+  int fd ;
+  uint8_t payload[PAYLOAD_SIZE_BYTES], i;
+
+  flushBuffer();
+  
+  if ((fd = serialOpen ("/dev/ttyS1", 115200)) < 0)
+  {
+    fprintf (stderr, "Unable to open serial device: %s\n", strerror (errno)) ;
+	printf("Unable to open serial device: %s\n", strerror (errno)) ;
+    pthread_exit((void *) 1);
+  }
+  serialFlush(fd);
+	while (1) 
+	{
+	insertInBuffer(serialGetchar(fd));
+    if(checkFraming(START_FRAME_VALUE, END_FRAME_VALUE, fd))
+    {
+      if(!getBufferData(payload))
+      {
+		/*
+        printf("Received Serial frame: ");
+        for(i=0; i<PAYLOAD_SIZE_BYTES; i++)
+        {
+          printf("%x ", payload[i]);
+        }
+        printf("\r\n");
+		*/
+        flushBuffer();
+		
+		for(i=0; i<MAX_NUM_ZYNCODERS; i++)
+		{
+		update_zyncoder(i, payload);
+		}
+
+		update_zynswitches(payload);
+      }
+      else
+      {
+        printf("Corrupt UART data block\r\n");
+      }
+    }
+
+	usleep(1000);
+	}
+	return NULL;
+}
+
+pthread_t init_uart_thread() {
+	pthread_t tid;
+	int err=pthread_create(&tid, NULL, &uart_thread, NULL);
+	if (err != 0) {
+		printf("Zyncoder: Can't create zynswitches poll thread :[%s]", strerror(err));
+		return 0;
+	} else {
+		printf("Zyncoder: Zynswitches poll thread created successfully\n");
+		return tid;
+	}
+}
+
+void insertInBuffer(uint8_t element)
+{
+  prev_head = head;
+  buffer[head] = element;
+  head++;
+  if(head >= BUFFER_SIZE_BYTES)
+  {
+    head = 0;
+  }
+
+  if(elementsInBuffer >= BUFFER_SIZE_BYTES)
+  {
+    tail++;
+    if(tail >= BUFFER_SIZE_BYTES)
+    {
+      tail = 0;
+    }
+  }
+  else 
+  {
+    elementsInBuffer++;
+  }
+}
+
+uint8_t getBufferData(uint8_t* pBuffer)
+{
+  uint8_t cnt;
+  for(cnt = 0; cnt < PAYLOAD_SIZE_BYTES; cnt++)
+  {
+    if((head+cnt+1) >= BUFFER_SIZE_BYTES)
+    {
+      if((buffer[((head+cnt+1)-BUFFER_SIZE_BYTES)] == START_FRAME_VALUE) ||
+          (buffer[((head+cnt+1)-BUFFER_SIZE_BYTES)] == END_FRAME_VALUE) ||
+           (buffer[((head+cnt+1)-BUFFER_SIZE_BYTES)] == 0xFF))
+        {
+          return 1;
+        }
+      pBuffer[cnt] = buffer[((head+cnt+1)-BUFFER_SIZE_BYTES)];
+    }
+    else
+    {
+      if((buffer[(head+cnt+1)] == START_FRAME_VALUE) ||
+          (buffer[(head+cnt+1)] == END_FRAME_VALUE)  || 
+          (buffer[(head+cnt+1)] == 0xFF))
+        {
+          return 1;
+        }
+      pBuffer[cnt] = buffer[(head+cnt+1)];
+    }
+  }
+  return 0;
+}
+
+void flushBuffer()
+{
+  uint8_t i;
+  head = 0;
+  prev_head = 0;
+  tail = 0;
+  elementsInBuffer = 0;
+  for(i=0; i<BUFFER_SIZE_BYTES; i++)
+  {
+    buffer[i]=0;
+  }
+}
+
+uint8_t checkFraming(uint8_t startByte, uint8_t endByte, int fd)
+{
+  if((buffer[tail] == startByte) && (buffer[prev_head] == endByte) && (elementsInBuffer >= BUFFER_SIZE_BYTES))
+  {
+    return 1;
+  }
+  else 
+  {
+    if(elementsInBuffer >= BUFFER_SIZE_BYTES)
+    {
+      flushBuffer();
+      serialFlush(fd);
+    } 
+  }
+  return 0;
+}
+
 #endif
