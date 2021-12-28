@@ -109,7 +109,7 @@ elseif (NOT ZYNTHIAN_FORCE_WIRINGPI_EMU AND HAVE_WIRINGPI_LIB)
 elseif (NOT ZYNTHIAN_FORCE_WIRINGPI_EMU AND ("$ENV{ZYNTHIAN_WIRING_LAYOUT}" STREQUAL "UART_ENCODERS"))
 	message("++ Using wiringSerial")
 	add_library(zyncoder SHARED zyncoder.h zyncoder.c zynmidirouter.h wiringSerial.h wiringSerial.c zynmidirouter.c zynmaster.h zynmaster.c)
-	target_link_libraries(zyncoder wiringPi jack lo)
+	target_link_libraries(zyncoder jack lo)
 
 else()
 	message("++ Using wiringPiEmu")
